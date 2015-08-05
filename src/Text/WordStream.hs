@@ -1,4 +1,4 @@
-module Text.NGram
+module Text.WordStream
        ( Gram
        , FreqTable
        , newTable
