@@ -1,5 +1,12 @@
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+
 module Text.WordStream
-       ( Gram
+       ( NGram
        , FreqTable
        , newTable
        , toList
@@ -14,6 +21,8 @@ module Text.WordStream
        , generate
        ) where
 
+import GHC.TypeLits
+
 import Data.List
 import Data.Maybe
 import Data.Char
@@ -22,40 +31,65 @@ import Control.Monad.Random hiding (fromList)
 import qualified Data.Map as M
 
 
-type Gram a = [a]
-newtype FreqTable a = FT { unFT :: M.Map (Gram a) [(a, Int)] }
+data Proxy (n :: Nat) = Proxy
+
+data NGram (n :: Nat) (a :: *) = NGram { unGram :: [a] }
+
+deriving instance Eq a   => Eq (NGram n a)
+deriving instance Ord a  => Ord (NGram n a)
+deriving instance Show a => Show (NGram n a)
+deriving instance Read a => Read (NGram n a)
+deriving instance Foldable (NGram n)
+
+type NGrams n a = [NGram n a]
 
 
-newTable :: FreqTable a
+makeGram :: forall n a . KnownNat n => [a] -> NGram n a
+makeGram grams
+  | length stuff < amount = error "makeGram: not enough data"
+  | otherwise             = NGram stuff
+  where
+    stuff  = take amount grams
+    amount = fromInteger $ natVal (Proxy :: Proxy n)
+
+
+newtype FreqTable n a = FT { unFT :: M.Map (NGram n a) [(a, Int)] }
+                        deriving (Eq, Ord, Show, Read)
+
+
+newTable :: FreqTable n a
 newTable = FT M.empty
 
-toList :: FreqTable a -> [(Gram a, [(a, Int)])]
+toList :: FreqTable n a -> [(NGram n a, [(a, Int)])]
 toList = M.toList . unFT
 
-fromList ::Ord a =>  [(Gram a, [(a, Int)])] -> FreqTable a
+fromList ::Ord a =>  [(NGram n a, [(a, Int)])] -> FreqTable n a
 fromList = FT . M.fromList
 
 
-saveToFile :: Show a => FilePath -> FreqTable a -> IO ()
+saveToFile :: Show a => FilePath -> FreqTable n a -> IO ()
 saveToFile filename = writeFile filename . show . toList
 
-loadFromFile :: (Ord a, Read a) => FilePath -> IO (FreqTable a)
+loadFromFile :: (Ord a, Read a) => FilePath -> IO (FreqTable n a)
 loadFromFile = liftM fromList . liftM read . readFile
 
 
 -- | Create a new table from scratch.
-makeTable :: (Eq a, Ord a) => Int -> [a] -> FreqTable a
-makeTable n words = train n words newTable
+makeTable :: forall n a . (Eq a, Ord a, KnownNat n) => [a] -> FreqTable n a
+makeTable words = train words newTable
 
 
 -- | Train a table on some input, returning a new table.
-train :: (Eq a, Ord a) => Int -> [a] -> FreqTable a -> FreqTable a
-train n words@(w:ws) table
-  | length stuff < n + 1 = table
-  | otherwise            = train n ws updated
+train :: forall n a . (Eq a, Ord a, KnownNat n)
+         => [a] -> FreqTable n a -> FreqTable n a
+train words@(w:ws) table
+  | length stuff < sz + 1 = table
+  | otherwise             = train ws updated
   where
-    stuff   = take (n + 1) words
-    updated = FT $ M.insertWith combine (take n stuff) [(last stuff, 1)] $ unFT table
+    stuff   = take (sz + 1) words
+    sz      = fromIntegral $ natVal (Proxy :: Proxy n)
+    gram    = makeGram (take sz stuff) :: NGram n a
+    updated = FT $ M.insertWith combine gram [(last stuff, 1)] $ unFT table
 
     combine new [] = new
     combine new@[(w', _)] ((w, f):rest)
@@ -64,7 +98,7 @@ train n words@(w:ws) table
 
 
 -- | Generate one new word from a table.
-getNext :: (RandomGen g, Ord a) => FreqTable a -> Gram a -> Rand g (Maybe a)
+getNext :: (RandomGen g, Ord a) => FreqTable n a -> NGram n a -> Rand g (Maybe a)
 getNext table gram = case M.lookup gram (unFT table) of
   Nothing    -> return Nothing
   Just words -> do
@@ -79,25 +113,25 @@ getNext table gram = case M.lookup gram (unFT table) of
 
 
 -- | Generate a lazy stream of words.
-stream :: (RandomGen g, Ord a) => FreqTable a -> Gram a -> Rand g [a]
+stream :: (RandomGen g, Ord a) => FreqTable n a -> NGram n a -> Rand g [a]
 stream table gram = do
   current <- getNext table gram
   case current of
     Nothing -> return []
     Just w -> do
-      let updated = tail gram ++ [w]
-      rest <- stream table updated
+      let updated = tail (unGram gram) ++ [w]
+      rest <- stream table (NGram updated)
       return $ w : rest
 
 
 -- | Get N words.
-getNextN :: (RandomGen g, Ord a) => FreqTable a -> Gram a -> Int -> Rand g [a]
+getNextN :: (RandomGen g, Ord a) => FreqTable n a -> NGram n a -> Int -> Rand g [a]
 getNextN table gram n = take n <$> (stream table gram)
 
 
 -- | Get N words, with the starting words tacked onto the front.
-generate :: (Ord a, RandomGen g) => FreqTable a -> Gram a -> Int -> Rand g [a]
-generate table gram n = (gram ++) <$> getNextN table gram (n - length gram)
+generate :: (Ord a, RandomGen g) => FreqTable n a -> NGram n a -> Int -> Rand g [a]
+generate table gram n = ((unGram gram) ++) <$> getNextN table gram (n - length gram)
 
 
 clean :: String -> String
@@ -108,5 +142,7 @@ clean = map toLower . filter isAlpha
 test :: String -> Int -> IO String
 test input sz = do
   stuff <- readFile "/home/bryan/Code/james.txt"
-  let table = train 2 (map clean $ words stuff) newTable
-  fmap unwords . evalRandIO $ generate table (words input) sz
+  let cleaned = map clean $ words stuff
+  let table   = train cleaned newTable :: FreqTable 2 String
+  result <- evalRandIO $ generate table (NGram $ words input) sz
+  return $ unwords result
