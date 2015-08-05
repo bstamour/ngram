@@ -1,19 +1,18 @@
 {-# LANGUAGE DeriveFoldable #-}
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
 
 module Text.WordStream
-       ( NGram
-       , FreqTable
-       , newTable
+       ( module GHC.TypeLits
+       , NGram
+       , Chain
+       , newChain
        , toList
        , fromList
        , loadFromFile
        , saveToFile
-       , makeTable
+       , makeChain
        , train
        , getNext
        , stream
@@ -34,14 +33,7 @@ import qualified Data.Map as M
 data Proxy (n :: Nat) = Proxy
 
 data NGram (n :: Nat) (a :: *) = NGram { unGram :: [a] }
-
-deriving instance Eq a   => Eq (NGram n a)
-deriving instance Ord a  => Ord (NGram n a)
-deriving instance Show a => Show (NGram n a)
-deriving instance Read a => Read (NGram n a)
-deriving instance Foldable (NGram n)
-
-type NGrams n a = [NGram n a]
+                                 deriving (Eq, Ord, Show, Read, Foldable)
 
 
 makeGram :: forall n a . KnownNat n => [a] -> NGram n a
@@ -53,35 +45,34 @@ makeGram grams
     amount = fromInteger $ natVal (Proxy :: Proxy n)
 
 
-newtype FreqTable n a = FT { unFT :: M.Map (NGram n a) [(a, Int)] }
-                        deriving (Eq, Ord, Show, Read)
+newtype Chain n a = FT { unFT :: M.Map (NGram n a) [(a, Int)] }
+                  deriving (Eq, Ord, Show, Read)
 
 
-newTable :: FreqTable n a
-newTable = FT M.empty
+newChain :: Chain n a
+newChain = FT M.empty
 
-toList :: FreqTable n a -> [(NGram n a, [(a, Int)])]
+toList :: Chain n a -> [(NGram n a, [(a, Int)])]
 toList = M.toList . unFT
 
-fromList ::Ord a =>  [(NGram n a, [(a, Int)])] -> FreqTable n a
+fromList ::Ord a =>  [(NGram n a, [(a, Int)])] -> Chain n a
 fromList = FT . M.fromList
 
 
-saveToFile :: Show a => FilePath -> FreqTable n a -> IO ()
+saveToFile :: Show a => FilePath -> Chain n a -> IO ()
 saveToFile filename = writeFile filename . show . toList
 
-loadFromFile :: (Ord a, Read a) => FilePath -> IO (FreqTable n a)
+loadFromFile :: (Ord a, Read a) => FilePath -> IO (Chain n a)
 loadFromFile = liftM fromList . liftM read . readFile
 
 
 -- | Create a new table from scratch.
-makeTable :: forall n a . (Eq a, Ord a, KnownNat n) => [a] -> FreqTable n a
-makeTable words = train words newTable
+makeChain :: forall n a . (Eq a, Ord a, KnownNat n) => [a] -> Chain n a
+makeChain words = train words newChain
 
 
 -- | Train a table on some input, returning a new table.
-train :: forall n a . (Eq a, Ord a, KnownNat n)
-         => [a] -> FreqTable n a -> FreqTable n a
+train :: forall n a . (Eq a, Ord a, KnownNat n) => [a] -> Chain n a -> Chain n a
 train words@(w:ws) table
   | length stuff < sz + 1 = table
   | otherwise             = train ws updated
@@ -98,7 +89,7 @@ train words@(w:ws) table
 
 
 -- | Generate one new word from a table.
-getNext :: (RandomGen g, Ord a) => FreqTable n a -> NGram n a -> Rand g (Maybe a)
+getNext :: (RandomGen g, Ord a) => Chain n a -> NGram n a -> Rand g (Maybe a)
 getNext table gram = case M.lookup gram (unFT table) of
   Nothing    -> return Nothing
   Just words -> do
@@ -113,7 +104,7 @@ getNext table gram = case M.lookup gram (unFT table) of
 
 
 -- | Generate a lazy stream of words.
-stream :: (RandomGen g, Ord a) => FreqTable n a -> NGram n a -> Rand g [a]
+stream :: (RandomGen g, Ord a) => Chain n a -> NGram n a -> Rand g [a]
 stream table gram = do
   current <- getNext table gram
   case current of
@@ -125,12 +116,12 @@ stream table gram = do
 
 
 -- | Get N words.
-getNextN :: (RandomGen g, Ord a) => FreqTable n a -> NGram n a -> Int -> Rand g [a]
+getNextN :: (RandomGen g, Ord a) => Chain n a -> NGram n a -> Int -> Rand g [a]
 getNextN table gram n = take n <$> (stream table gram)
 
 
 -- | Get N words, with the starting words tacked onto the front.
-generate :: (Ord a, RandomGen g) => FreqTable n a -> NGram n a -> Int -> Rand g [a]
+generate :: (Ord a, RandomGen g) => Chain n a -> NGram n a -> Int -> Rand g [a]
 generate table gram n = ((unGram gram) ++) <$> getNextN table gram (n - length gram)
 
 
@@ -143,6 +134,7 @@ test :: String -> Int -> IO String
 test input sz = do
   stuff <- readFile "/home/bryan/Code/james.txt"
   let cleaned = map clean $ words stuff
-  let table   = train cleaned newTable :: FreqTable 2 String
-  result <- evalRandIO $ generate table (NGram $ words input) sz
+  let table   = newChain :: Chain 3 String
+  let trained = train cleaned table
+  result <- evalRandIO $ generate trained (NGram $ words input) sz
   return $ unwords result
