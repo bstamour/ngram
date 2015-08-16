@@ -28,20 +28,14 @@ module Text.WordStream
 
 import GHC.TypeLits
 import Data.Proxy
-
-import Data.List
-import Data.Maybe
-import Data.Char
 import Control.Monad
 import Control.Monad.Random hiding (fromList)
 import qualified Data.Map as M
-
 
 -----------------------------------------------------------------------------------
 -- An n-gram that knows its size at compile time. This allows us to force chains
 -- to only have one kind of n-gram inside it, instead of relying on lists that can
 -- vary in size.
-
 
 data NGram :: Nat -> * -> * where
   NGram :: [a] -> NGram n a
@@ -49,33 +43,28 @@ data NGram :: Nat -> * -> * where
 unGram :: NGram n a -> [a]
 unGram (NGram xs) = xs
 
-deriving instance Eq a => Eq (NGram n a)
-deriving instance Ord a => Ord (NGram n a)
+deriving instance Eq a   => Eq (NGram n a)
+deriving instance Ord a  => Ord (NGram n a)
 deriving instance Show a => Show (NGram n a)
 deriving instance Read a => Read (NGram n a)
 deriving instance Foldable (NGram n)
 
-makeGram :: forall n a . KnownNat n => [a] -> NGram n a
-makeGram grams
-  | length stuff < amount = error "makeGram: not enough data"
-  | otherwise             = NGram stuff
+makeGram :: forall n a . KnownNat n => [a] -> Maybe (NGram n a)
+makeGram grams | length stuff < amount = Nothing
+               | otherwise             = Just $ NGram stuff
   where
     stuff  = take amount grams
     amount = val (Proxy :: Proxy n)
 
-
 -----------------------------------------------------------------------------------
 -- A chain of n-grams is a map from n-grams to frequency tables.
-
 
 newtype Chain n a = FT { unFT :: M.Map (NGram n a) [(a, Int)] }
                   deriving (Eq, Ord, Show, Read)
 
-
 -----------------------------------------------------------------------------------
 -- Dependently typed functions. Chains carry the size of their n-grams as a part
 -- of the type. This function lets you use runtime values as the size.
-
 
 withChain :: Integer -> (forall n . KnownNat n => Chain n a -> b) -> b
 withChain i f = case someNatVal i of
@@ -88,10 +77,8 @@ withChain' (SomeNat p) f = withChain'' p f
 withChain'' :: KnownNat n => Proxy n -> (Chain n a -> b) -> b
 withChain'' _ f = f (newChain :: Chain n a)
 
-
 -----------------------------------------------------------------------------------
 -- Loading and saving markov chains.
-
 
 toList :: Chain n a -> [(NGram n a, [(a, Int)])]
 toList = M.toList . unFT
@@ -105,10 +92,8 @@ saveToFile filename = writeFile filename . show . toList
 loadFromFile :: (Ord a, Read a) => FilePath -> IO (Chain n a)
 loadFromFile = liftM fromList . liftM read . readFile
 
-
 -----------------------------------------------------------------------------------
 -- Primary interface.
-
 
 newChain :: Chain n a
 newChain = FT M.empty
@@ -119,14 +104,14 @@ makeChain words = train words newChain
 
 -- | Train a table on some input, returning a new table.
 train :: forall n a . (Eq a, Ord a, KnownNat n) => [a] -> Chain n a -> Chain n a
-train words@(w:ws) table
-  | length stuff < sz + 1 = table
-  | otherwise             = train ws updated
+train [] table = table
+train words@(w:ws) table | length stuff < sz + 1 = table
+                         | otherwise             = train ws updated
   where
-    stuff   = take (sz + 1) words
-    sz      = val (Proxy :: Proxy n)
-    gram    = makeGram (take sz stuff) :: NGram n a
-    updated = FT $ M.insertWith combine gram [(last stuff, 1)] $ unFT table
+    stuff        = take (sz + 1) words
+    sz           = val (Proxy :: Proxy n)
+    ~(Just gram) = makeGram (take sz stuff) :: Maybe (NGram n a)
+    updated      = FT $ M.insertWith combine gram [(last stuff, 1)] $ unFT table
 
     combine new [] = new
     combine new@[(w', _)] ((w, f):rest)
@@ -143,9 +128,8 @@ getNext table gram = case M.lookup gram (unFT table) of
     return $ findNext words n 0
   where
     findNext [] _ _ = Nothing
-    findNext ((w, f) : ws) n low
-      | n - low < f = Just w
-      | otherwise   = findNext ws n (low + f)
+    findNext ((w, f) : ws) n low | n - low < f = Just w
+                                 | otherwise   = findNext ws n (low + f)
 
 -- | Generate a lazy stream of words.
 stream :: (RandomGen g, Ord a) => Chain n a -> NGram n a -> Rand g [a]
@@ -153,7 +137,7 @@ stream table gram = do
   current <- getNext table gram
   case current of
     Nothing -> return []
-    Just w -> do
+    Just w   -> do
       let updated = tail (unGram gram) ++ [w]
       rest <- stream table (NGram updated)
       return $ w : rest
@@ -166,52 +150,8 @@ getNextN table gram n = take n <$> (stream table gram)
 generate :: (Ord a, RandomGen g) => Chain n a -> NGram n a -> Int -> Rand g [a]
 generate table gram n = ((unGram gram) ++) <$> getNextN table gram (n - length gram)
 
-
 -------------------------------------------------------------------------------------
 -- Helper functions.
 
-
 val :: (Num a, KnownNat n) => Proxy n -> a
 val = fromIntegral . natVal
-
-
--------------------------------------------------------------------------------------
--- Testing stuff
-
-
-clean :: String -> String
-clean = map toLower . filter isAlpha
-
-
--- Simple test.
-test :: String -> Int -> IO String
-test input sz = do
-  stuff <- readFile "/home/bryan/Code/james.txt"
-  let cleaned = map clean $ words stuff
-  let table   = newChain :: Chain 3 String
-  let trained = train cleaned table
-  result <- evalRandIO $ generate trained (NGram $ words input) sz
-  return $ unwords result
-
-
--- Example of how one can use dependent types. The size of the n-grams in the
--- chain is a part of the type itself, but the value is read in at runtime.
-test2 :: IO String
-test2 = do
-  -- First read the required params.
-  putStr "Enter size of n-grams: "
-  sz <- liftM read getLine
-  putStr "Enter the starting phrase: "
-  phrase <- getLine
-  putStr "Enter the number of words to generate: "
-  n <- liftM read getLine
-
-  -- Get the training material.
-  stuff <- readFile "/home/bryan/Code/james.txt"
-  let cleaned = map clean $ words stuff
-
-  -- Create a chain of n-grams where n = sz (read at runtime).
-  withChain sz $ \chain -> do
-    let trained = train cleaned chain
-    result <- evalRandIO $ generate trained (NGram $ words phrase) n
-    return $ unwords result
